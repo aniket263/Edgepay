@@ -1,0 +1,18 @@
+# Secrets
+backend/config.php
+backend/cashfree.php
+
+# Composer dependencies
+vendor/
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
