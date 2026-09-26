@@ -74,7 +74,7 @@ $http_code =
     );
 
 
-curl_close($ch);
+
 
 
 if ($response === false) {

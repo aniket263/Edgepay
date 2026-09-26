@@ -276,7 +276,7 @@ $http_code =
     );
 
 
-curl_close($ch);
+
 
 
 /*
