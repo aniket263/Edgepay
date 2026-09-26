@@ -1,6 +1,5 @@
 # Secrets
-backend/config.php
-backend/cashfree.php
+
 
 # Composer dependencies
 vendor/
