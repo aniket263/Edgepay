@@ -5,17 +5,16 @@ require_once "../cashfree.php";
 
 header("Content-Type: application/json");
 
-
-/*
-|--------------------------------------------------------------------------
-| DEVICE AUTHENTICATION
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// DEVICE AUTHENTICATION
+// --------------------------------------------------
 
 $device_key = $_SERVER["HTTP_X_DEVICE_KEY"] ?? "";
 
-if (!hash_equals($edgepay_device_key, $device_key)) {
-
+if (
+    empty($device_key) ||
+    !hash_equals($edgepay_device_key, $device_key)
+) {
     http_response_code(401);
 
     echo json_encode([
@@ -27,36 +26,23 @@ if (!hash_equals($edgepay_device_key, $device_key)) {
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| GET AMOUNT FROM ESP32
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// GET AMOUNT
+// --------------------------------------------------
 
 $amount = $_POST["amount"] ?? "";
 
-if (
-    empty($amount) ||
-    !is_numeric($amount) ||
-    $amount <= 0
-) {
+if (!is_numeric($amount) || (float)$amount <= 0) {
 
     http_response_code(400);
 
     echo json_encode([
         "status" => "error",
-        "message" => "Valid amount is required"
+        "message" => "Invalid amount"
     ]);
 
     exit;
 }
-
-
-/*
-|--------------------------------------------------------------------------
-| FORMAT AMOUNT
-|--------------------------------------------------------------------------
-*/
 
 $amount = number_format(
     (float)$amount,
@@ -66,84 +52,107 @@ $amount = number_format(
 );
 
 
-/*
-|--------------------------------------------------------------------------
-| MERCHANT
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// MERCHANT
+// --------------------------------------------------
 
 $merchant_id = 1;
 
-
-/*
-|--------------------------------------------------------------------------
-| CREATE EDGEPAY TRANSACTION
-|--------------------------------------------------------------------------
-*/
-
-$transaction_ref =
-    "TXN_" .
-    date("YmdHis") .
-    "_" .
-    strtoupper(
-        bin2hex(
-            random_bytes(4)
-        )
-    );
-
-
-$upi_payload = "";
-
-
 $stmt = $conn->prepare(
-    "INSERT INTO transactions
-     (
-        transaction_ref,
-        merchant_id,
-        amount,
-        status,
-        upi_payload
-     )
-     VALUES
-     (
-        ?,
-        ?,
-        ?,
-        'PENDING',
-        ?
-     )"
+    "SELECT id
+     FROM merchants
+     WHERE id = ?
+     LIMIT 1"
 );
-
 
 $stmt->bind_param(
-    "sids",
-    $transaction_ref,
-    $merchant_id,
-    $amount,
-    $upi_payload
+    "i",
+    $merchant_id
 );
 
+$stmt->execute();
 
-if (!$stmt->execute()) {
+$result = $stmt->get_result();
 
-    http_response_code(500);
+$merchant = $result->fetch_assoc();
+
+if (!$merchant) {
+
+    http_response_code(404);
 
     echo json_encode([
         "status" => "error",
-        "message" => "Failed to create transaction"
+        "message" => "Merchant not found"
     ]);
 
     exit;
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| CREATE CASHFREE ORDER
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// CREATE TRANSACTION REFERENCE
+// --------------------------------------------------
+
+$transaction_ref =
+    "TXN_" .
+    date("YmdHis") .
+    "_" .
+    strtoupper(
+        bin2hex(random_bytes(4))
+    );
 
 $order_id = $transaction_ref;
+
+
+// --------------------------------------------------
+// INSERT LOCAL TRANSACTION
+// --------------------------------------------------
+
+$stmt = $conn->prepare(
+    "INSERT INTO transactions
+    (
+        transaction_ref,
+        merchant_id,
+        amount,
+        status
+    )
+    VALUES (?, ?, ?, 'PENDING')"
+);
+
+$stmt->bind_param(
+    "sid",
+    $transaction_ref,
+    $merchant_id,
+    $amount
+);
+
+$stmt->execute();
+
+
+// --------------------------------------------------
+// PUBLIC RETURN URL
+// --------------------------------------------------
+
+$public_url = rtrim(
+    env_value(
+        "EDGEPAY_PUBLIC_URL",
+        "http://localhost:8000"
+    ),
+    "/"
+);
+
+$return_url =
+    $public_url .
+    "/api/payment-return.php?order_id={order_id}";
+
+
+// --------------------------------------------------
+// CASHFREE ORDER
+// --------------------------------------------------
+
+$url =
+    $cashfree_base_url .
+    "/orders";
 
 
 $data = [
@@ -160,51 +169,34 @@ $data = [
     "customer_details" => [
 
         "customer_id" =>
-            "edgepay_device",
+            "edgepay_user",
 
         "customer_phone" =>
             "9876543210"
-
     ],
 
     "order_meta" => [
 
         "return_url" =>
-            "http://localhost:8000/api/payment-return.php?order_id={order_id}"
-
+            $return_url
     ]
-
 ];
-
-
-$json_data = json_encode($data);
-
-
-/*
-|--------------------------------------------------------------------------
-| CASHFREE API REQUEST
-|--------------------------------------------------------------------------
-*/
-
-$url =
-    $cashfree_base_url .
-    "/orders";
 
 
 $ch = curl_init($url);
 
+curl_setopt_array($ch, [
 
-curl_setopt(
-    $ch,
-    CURLOPT_POST,
-    true
-);
+    CURLOPT_RETURNTRANSFER =>
+        true,
 
+    CURLOPT_POST =>
+        true,
 
-curl_setopt(
-    $ch,
-    CURLOPT_HTTPHEADER,
-    [
+    CURLOPT_POSTFIELDS =>
+        json_encode($data),
+
+    CURLOPT_HTTPHEADER => [
 
         "x-client-id: " .
             $cashfree_app_id,
@@ -218,56 +210,15 @@ curl_setopt(
         "Content-Type: application/json",
 
         "Accept: application/json"
+    ],
 
-    ]
-);
+    CURLOPT_TIMEOUT =>
+        15
+]);
 
-
-curl_setopt(
-    $ch,
-    CURLOPT_POSTFIELDS,
-    $json_data
-);
-
-
-curl_setopt(
-    $ch,
-    CURLOPT_RETURNTRANSFER,
-    true
-);
-
-
-curl_setopt(
-    $ch,
-    CURLOPT_CONNECTTIMEOUT,
-    10
-);
-
-
-curl_setopt(
-    $ch,
-    CURLOPT_TIMEOUT,
-    30
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| EXECUTE REQUEST
-|--------------------------------------------------------------------------
-*/
 
 $response =
     curl_exec($ch);
-
-
-$curl_error =
-    curl_error($ch);
-
-
-$curl_errno =
-    curl_errno($ch);
-
 
 $http_code =
     curl_getinfo(
@@ -275,19 +226,17 @@ $http_code =
         CURLINFO_HTTP_CODE
     );
 
+$curl_error =
+    curl_error($ch);
 
 
-
-
-/*
-|--------------------------------------------------------------------------
-| CURL ERROR
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// CURL ERROR
+// --------------------------------------------------
 
 if ($response === false) {
 
-    http_response_code(500);
+    http_response_code(502);
 
     echo json_encode([
 
@@ -297,36 +246,24 @@ if ($response === false) {
         "message" =>
             "Cashfree request failed",
 
-        "curl_errno" =>
-            $curl_errno,
-
-        "curl_error" =>
+        "error" =>
             $curl_error
-
     ]);
 
     exit;
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| DECODE CASHFREE RESPONSE
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// CASHFREE RESPONSE
+// --------------------------------------------------
 
-$response_data =
+$cashfree_response =
     json_decode(
         $response,
         true
     );
 
-
-/*
-|--------------------------------------------------------------------------
-| CASHFREE ERROR
-|--------------------------------------------------------------------------
-*/
 
 if (
     $http_code < 200 ||
@@ -345,44 +282,28 @@ if (
         "message" =>
             "Cashfree order creation failed",
 
-        "http_code" =>
-            $http_code,
-
         "cashfree_response" =>
-            $response_data
-
+            $cashfree_response
     ]);
 
     exit;
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| GET CASHFREE ORDER DETAILS
-|--------------------------------------------------------------------------
-*/
-
-$cashfree_order_id =
-    $response_data["order_id"]
-    ?? $order_id;
-
-
-$cashfree_cf_order_id =
-    $response_data["cf_order_id"]
-    ?? null;
-
+// --------------------------------------------------
+// PAYMENT SESSION
+// --------------------------------------------------
 
 $payment_session_id =
-    $response_data["payment_session_id"]
-    ?? null;
+    $cashfree_response[
+        "payment_session_id"
+    ] ?? null;
 
+$cf_order_id =
+    $cashfree_response[
+        "cf_order_id"
+    ] ?? null;
 
-/*
-|--------------------------------------------------------------------------
-| VERIFY PAYMENT SESSION
-|--------------------------------------------------------------------------
-*/
 
 if (empty($payment_session_id)) {
 
@@ -394,22 +315,16 @@ if (empty($payment_session_id)) {
             "error",
 
         "message" =>
-            "Cashfree did not return a payment session ID",
-
-        "cashfree_response" =>
-            $response_data
-
+            "Payment session ID not received"
     ]);
 
     exit;
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| SAVE CASHFREE DETAILS
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// SAVE CASHFREE DETAILS
+// --------------------------------------------------
 
 $stmt = $conn->prepare(
 
@@ -422,45 +337,25 @@ $stmt = $conn->prepare(
 
 );
 
-
 $stmt->bind_param(
 
     "ssss",
 
-    $cashfree_order_id,
+    $order_id,
 
-    $cashfree_cf_order_id,
+    $cf_order_id,
 
     $payment_session_id,
 
     $transaction_ref
-
 );
 
-
-if (!$stmt->execute()) {
-
-    http_response_code(500);
-
-    echo json_encode([
-
-        "status" =>
-            "error",
-
-        "message" =>
-            "Failed to save Cashfree order details"
-
-    ]);
-
-    exit;
-}
+$stmt->execute();
 
 
-/*
-|--------------------------------------------------------------------------
-| SUCCESS RESPONSE TO ESP32
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// RESPONSE
+// --------------------------------------------------
 
 echo json_encode([
 
@@ -477,14 +372,13 @@ echo json_encode([
         $amount,
 
     "cashfree_order_id" =>
-        $cashfree_order_id,
+        $order_id,
 
     "cashfree_cf_order_id" =>
-        $cashfree_cf_order_id,
+        $cf_order_id,
 
     "payment_session_id" =>
         $payment_session_id
-
 ]);
 
 ?>

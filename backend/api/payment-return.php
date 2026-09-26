@@ -3,18 +3,22 @@
 require_once "../config.php";
 require_once "../cashfree.php";
 
-$order_id = $_GET["order_id"] ?? "";
+$order_id =
+    $_GET["order_id"] ?? "";
 
 if (empty($order_id)) {
-    die("Order ID is missing");
+
+    http_response_code(400);
+
+    echo "Order ID is required";
+
+    exit;
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| VERIFY PAYMENT WITH CASHFREE
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// Get payment information from Cashfree
+// --------------------------------------------------
 
 $url =
     $cashfree_base_url .
@@ -25,47 +29,32 @@ $url =
 
 $ch = curl_init($url);
 
+curl_setopt_array($ch, [
 
-curl_setopt(
-    $ch,
-    CURLOPT_RETURNTRANSFER,
-    true
-);
+    CURLOPT_RETURNTRANSFER =>
+        true,
 
+    CURLOPT_HTTPHEADER => [
 
-curl_setopt(
-    $ch,
-    CURLOPT_HTTPHEADER,
-    [
-        "x-api-version: " . $cashfree_api_version,
-        "x-client-id: " . $cashfree_app_id,
-        "x-client-secret: " . $cashfree_secret_key,
+        "x-client-id: " .
+            $cashfree_app_id,
+
+        "x-client-secret: " .
+            $cashfree_secret_key,
+
+        "x-api-version: " .
+            $cashfree_api_version,
+
         "Accept: application/json"
-    ]
-);
+    ],
 
-
-curl_setopt(
-    $ch,
-    CURLOPT_CONNECTTIMEOUT,
-    10
-);
-
-
-curl_setopt(
-    $ch,
-    CURLOPT_TIMEOUT,
-    30
-);
+    CURLOPT_TIMEOUT =>
+        15
+]);
 
 
 $response =
     curl_exec($ch);
-
-
-$curl_error =
-    curl_error($ch);
-
 
 $http_code =
     curl_getinfo(
@@ -73,18 +62,27 @@ $http_code =
         CURLINFO_HTTP_CODE
     );
 
+$curl_error =
+    curl_error($ch);
 
 
-
+// --------------------------------------------------
+// CURL ERROR
+// --------------------------------------------------
 
 if ($response === false) {
 
-    die(
-        "Cashfree verification failed: " .
-        htmlspecialchars($curl_error)
-    );
+    http_response_code(502);
+
+    echo "Payment verification failed";
+
+    exit;
 }
 
+
+// --------------------------------------------------
+// Decode Cashfree response
+// --------------------------------------------------
 
 $payments =
     json_decode(
@@ -93,23 +91,9 @@ $payments =
     );
 
 
-if (
-    $http_code < 200 ||
-    $http_code >= 300
-) {
-
-    die(
-        "Cashfree verification failed. HTTP: " .
-        htmlspecialchars($http_code)
-    );
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| DETERMINE PAYMENT STATUS
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// Determine payment status
+// --------------------------------------------------
 
 $payment_status =
     "NOT_ATTEMPTED";
@@ -120,67 +104,42 @@ if (
     count($payments) > 0
 ) {
 
-    foreach ($payments as $payment) {
+    $latest_payment =
+        $payments[0];
 
-        if (
-            ($payment["payment_status"] ?? "")
-            === "SUCCESS"
-        ) {
-
-            $payment_status =
-                "SUCCESS";
-
-            break;
-        }
-    }
-
-
-    if (
-        $payment_status !==
-        "SUCCESS"
-    ) {
-
-        $latest_payment =
-            $payments[
-                count($payments) - 1
-            ];
-
-
-        $payment_status =
+    $payment_status =
+        strtoupper(
             $latest_payment[
                 "payment_status"
-            ]
-            ?? "NOT_ATTEMPTED";
-    }
+            ] ?? "NOT_ATTEMPTED"
+        );
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| UPDATE EDGEPAY DATABASE
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// Update local transaction
+// --------------------------------------------------
 
-if (
-    $payment_status ===
-    "SUCCESS"
-) {
+if ($payment_status === "SUCCESS") {
 
     $stmt = $conn->prepare(
+
         "UPDATE transactions
          SET
             status = 'SUCCESS',
-            paid_at = CURRENT_TIMESTAMP
-         WHERE cashfree_order_id = ?
-         AND status = 'PENDING'"
-    );
+            paid_at = COALESCE(
+                paid_at,
+                CURRENT_TIMESTAMP
+            )
+         WHERE transaction_ref = ?
+           AND status = 'PENDING'"
 
+    );
 
     $stmt->bind_param(
         "s",
         $order_id
     );
-
 
     $stmt->execute();
 }
@@ -188,38 +147,53 @@ if (
 
 elseif (
     $payment_status === "FAILED" ||
-    $payment_status === "USER_DROPPED" ||
-    $payment_status === "CANCELLED" ||
-    $payment_status === "VOID"
+    $payment_status === "USER_DROPPED"
 ) {
 
     $stmt = $conn->prepare(
+
         "UPDATE transactions
          SET status = 'FAILED'
-         WHERE cashfree_order_id = ?
-         AND status = 'PENDING'"
-    );
+         WHERE transaction_ref = ?
+           AND status = 'PENDING'"
 
+    );
 
     $stmt->bind_param(
         "s",
         $order_id
     );
 
-
     $stmt->execute();
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| SHOW RESULT PAGE
-|--------------------------------------------------------------------------
-*/
+// --------------------------------------------------
+// Public EdgePay URL
+// --------------------------------------------------
+
+$public_url = rtrim(
+
+    env_value(
+        "EDGEPAY_PUBLIC_URL",
+        "http://localhost:8000"
+    ),
+
+    "/"
+);
+
+
+// --------------------------------------------------
+// Redirect to result page
+// --------------------------------------------------
 
 header(
-    "Location: http://localhost:8000/api/payment-result.php?transaction_ref="
-    . urlencode($order_id)
+
+    "Location: " .
+    $public_url .
+    "/api/payment-result.php?transaction_ref=" .
+    urlencode($order_id)
+
 );
 
 exit;
