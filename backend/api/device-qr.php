@@ -2,68 +2,36 @@
 
 require_once "../config.php";
 require_once "../cashfree.php";
-require_once __DIR__ . "/../../vendor/autoload.php";
+require_once "../../vendor/autoload.php";
 
 use Endroid\QrCode\Builder\Builder;
-use Endroid\QrCode\Encoding\Encoding;
-use Endroid\QrCode\ErrorCorrectionLevel;
-use Endroid\QrCode\RoundBlockSizeMode;
 use Endroid\QrCode\Writer\PngWriter;
-
-
-/*
-|--------------------------------------------------------------------------
-| DEVICE AUTHENTICATION
-|--------------------------------------------------------------------------
-*/
 
 $device_key = $_SERVER["HTTP_X_DEVICE_KEY"] ?? "";
 
-if (!hash_equals($edgepay_device_key, $device_key)) {
-
+if (
+    empty($device_key) ||
+    !hash_equals($edgepay_device_key, $device_key)
+) {
     http_response_code(401);
-
-    header("Content-Type: application/json");
-
-    echo json_encode([
-        "status" => "error",
-        "message" => "Unauthorized device"
-    ]);
-
-    exit;
+    exit("Unauthorized device");
 }
-
-
-/*
-|--------------------------------------------------------------------------
-| GET TRANSACTION
-|--------------------------------------------------------------------------
-*/
 
 $transaction_ref = $_GET["transaction_ref"] ?? "";
 
 if (empty($transaction_ref)) {
-
     http_response_code(400);
-
-    header("Content-Type: application/json");
-
-    echo json_encode([
-        "status" => "error",
-        "message" => "Transaction reference is required"
-    ]);
-
-    exit;
+    exit("Transaction reference is required");
 }
 
-
 $stmt = $conn->prepare(
-    "SELECT transaction_ref,
-            amount,
-            status,
-            payment_session_id
+    "SELECT
+        transaction_ref,
+        payment_session_id,
+        status
      FROM transactions
-     WHERE transaction_ref = ?"
+     WHERE transaction_ref = ?
+     LIMIT 1"
 );
 
 $stmt->bind_param("s", $transaction_ref);
@@ -72,104 +40,46 @@ $stmt->execute();
 $result = $stmt->get_result();
 $transaction = $result->fetch_assoc();
 
-
 if (!$transaction) {
-
     http_response_code(404);
-
-    header("Content-Type: application/json");
-
-    echo json_encode([
-        "status" => "error",
-        "message" => "Transaction not found"
-    ]);
-
-    exit;
+    exit("Transaction not found");
 }
-
-
-/*
-|--------------------------------------------------------------------------
-| PAYMENT SESSION CHECK
-|--------------------------------------------------------------------------
-*/
-
-if (empty($transaction["payment_session_id"])) {
-
-    http_response_code(400);
-
-    header("Content-Type: application/json");
-
-    echo json_encode([
-        "status" => "error",
-        "message" => "Cashfree payment session not available"
-    ]);
-
-    exit;
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| ONLY PENDING TRANSACTIONS
-|--------------------------------------------------------------------------
-*/
 
 if ($transaction["status"] !== "PENDING") {
-
     http_response_code(400);
+    exit("Transaction is not pending");
+}
 
-    header("Content-Type: application/json");
-
-    echo json_encode([
-        "status" => "error",
-        "message" => "Transaction is not pending",
-        "current_status" => $transaction["status"]
-    ]);
-
-    exit;
+if (empty($transaction["payment_session_id"])) {
+    http_response_code(400);
+    exit("Payment session not available");
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| CHECKOUT URL
-|--------------------------------------------------------------------------
-|
-| This URL opens EdgePay checkout.
-| Cashfree Checkout then provides the Dynamic QR.
-|
-*/
+// Public EdgePay URL
+$public_url = env_value(
+    "EDGEPAY_PUBLIC_URL",
+    "http://localhost:8000"
+);
 
 $checkout_url =
-    $edgepay_base_url .
+    rtrim($public_url, "/") .
     "/api/checkout.php?transaction_ref=" .
     urlencode($transaction_ref);
 
 
-/*
-|--------------------------------------------------------------------------
-| GENERATE QR
-|--------------------------------------------------------------------------
-*/
-
+// Generate QR using Endroid QR Code v6
 $builder = new Builder(
     writer: new PngWriter(),
-    writerOptions: [],
-    validateResult: false,
     data: $checkout_url,
-    encoding: new Encoding("UTF-8"),
-    errorCorrectionLevel: ErrorCorrectionLevel::High,
-    size: 300,
-    margin: 10,
-    roundBlockSizeMode: RoundBlockSizeMode::Margin
+    size: 400,
+    margin: 10
 );
 
-$qr = $builder->build();
+$qr_result = $builder->build();
 
+header("Content-Type: " . $qr_result->getMimeType());
 
-header("Content-Type: image/png");
-
-echo $qr->getString();
+echo $qr_result->getString();
 
 ?>
